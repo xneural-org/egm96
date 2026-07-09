@@ -42,6 +42,12 @@ Issues = "https://github.com/xneural-org/egm96/issues"
 requires = ["uv_build>=0.11.19,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+# The grid is generated into the package dir (gitignored). Files under the
+# module root are already included in the wheel; this also pulls it into the
+# source distribution so `pip install` from sdist works too.
+source-include = ["src/egm96/data/egm96-5.npz"]
+
 [dependency-groups]
 # pytest for the test suite; httpx + pygeodesy are only needed to (re)generate
 # and validate the bundled grid via ./generate-egm96-grid.
@@ -49,4 +55,29 @@ dev = [
     "pytest>=9.1.1",
     "httpx>=0.28.1",
     "pygeodesy>=26.7.7",
+    "ruff>=0.15.20",
+    "ty>=0.0.57",
 ]
+
+[tool.ruff]
+line-length = 100
+# The grid generator is an extensionless executable script, not a *.py file.
+extend-include = ["generate-egm96-grid"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
+include = ["src", "tests", "generate-egm96-grid"]

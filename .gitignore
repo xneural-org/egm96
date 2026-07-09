@@ -12,5 +12,6 @@ wheels/
 # Generated / downloaded EGM96 data (produced at build time, never committed)
 *.npy
 *.npz
-/geoid/
+/geoids/
 .python-version
+*.tar.bz2
