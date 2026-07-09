@@ -1,0 +1,52 @@
+[project]
+name = "egm96"
+version = "0.1.0"
+description = "EGM96 geoid undulations"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "egm96",
+    "geoid",
+    "undulation",
+    "geodesy",
+    "gps",
+    "wgs84",
+    "ellipsoid",
+    "elevation",
+    "altitude",
+    "mean-sea-level",
+]
+classifiers = [
+    "Topic :: Scientific/Engineering :: GIS",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+authors = [
+    { name = "Jonas Ehrlich", email = "jonas.ehrlich@xneural.ai" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    # Floor kept at a Python 3.10-compatible release; newer interpreters still
+    # resolve to the latest numpy (2.5+).
+    "numpy>=2.2.6",
+]
+
+[project.urls]
+Repository = "https://github.com/xneural-org/egm96"
+Issues = "https://github.com/xneural-org/egm96/issues"
+
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+# pytest for the test suite; httpx + pygeodesy are only needed to (re)generate
+# and validate the bundled grid via ./generate-egm96-grid.
+dev = [
+    "pytest>=9.1.1",
+    "httpx>=0.28.1",
+    "pygeodesy>=26.7.7",
+]

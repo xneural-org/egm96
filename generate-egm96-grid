@@ -1,0 +1,228 @@
+#! /usr/bin/env python3
+"""Generate the bundled EGM96 grid used by the :mod:`egm96` package.
+
+Downloads the official 5' EGM96 geoid (``egm96-5.pgm``) from GeographicLib and
+builds a compact 0.25 degree grid from it.
+
+Because 0.25 degrees is exactly three times the model's 5' spacing, the grid
+nodes are an exact subset of the PGM samples: the script simply parses the PGM
+and keeps every third pixel (no interpolation, no accuracy loss at the nodes).
+The result is quantized to int16 centimeters and written as a compressed
+``.npz`` into the package data directory. The whole thing runs in well under a
+second once the source PGM is available locally.
+
+The source PGM is downloaded once into a local cache and reused on subsequent
+runs; it is only fetched if it is not already present. The output ``.npz`` is
+intentionally *not* committed to the repository; it is regenerated during the
+CI build (see ``.github/workflows``) and bundled into the wheel.
+
+Requires the ``dev`` dependency group::
+
+    uv sync
+    uv run ./generate-egm96-grid
+"""
+
+from __future__ import annotations
+
+import argparse
+import pathlib
+import urllib.parse
+
+import httpx
+import numpy as np
+import numpy.typing as npt
+
+ARCHIVE_URL = (
+    "https://downloads.sourceforge.net/project/geographiclib/geoids-distrib/egm96-5.tar.bz2"
+)
+ARCHIVE_MEMBER = "geoids/egm96-5.pgm"
+
+#: The PGM is a 5' grid; 0.25 degrees = 3 x 5', so every third sample is kept.
+DECIMATION = 3
+
+_ROOT = pathlib.Path(__file__).parent
+
+#: Local cache for the downloaded source PGM. Also read by the accuracy test.
+DEFAULT_PGM = _ROOT / "geoid" / ARCHIVE_MEMBER
+
+#: Where the generated grid is written for bundling into the wheel.
+DEFAULT_OUTPUT = _ROOT / "src" / "egm96" / "data" / "egm96.npz"
+
+
+def download_pgm(url: str, pgm_path: pathlib.Path) -> None:
+    """Download and extract the geoid PGM to ``pgm_path``.
+
+    :param url: URL of the ``.tar.bz2`` geoid archive to download.
+    :param pgm_path: Destination path for the extracted PGM. Its parent
+        directory is used as the extraction root and created if needed.
+    :raises httpx.HTTPStatusError: If the download responds with an error status.
+    """
+    import tarfile
+
+    dest = pgm_path.parent.parent  # the archive stores geoids/egm96-5.pgm
+    dest.mkdir(parents=True, exist_ok=True)
+    filename = pathlib.PurePosixPath(urllib.parse.urlsplit(url).path).name
+    archive_path = dest / filename
+
+    print(f"Downloading {filename} ...")
+    with (
+        httpx.Client(follow_redirects=True) as client,
+        client.stream("GET", url) as response,
+    ):
+        response.raise_for_status()
+        with archive_path.open("wb") as archive:
+            for chunk in response.iter_bytes():
+                archive.write(chunk)
+
+    print(f"Extracting {ARCHIVE_MEMBER} ...")
+    with tarfile.open(archive_path, mode="r:bz2") as tar:
+        tar.extract(tar.getmember(ARCHIVE_MEMBER), dest, filter="data")
+
+
+def read_pgm(path: pathlib.Path) -> npt.NDArray[np.float64]:
+    """Parse a GeographicLib geoid PGM into a height array in meters.
+
+    Rows run from +90 degrees (row 0) to -90 degrees; columns run from
+    0 degrees to just under 360 degrees. Heights are recovered as
+    ``offset + scale * pixel`` using the ``Offset``/``Scale`` values stored in
+    the PGM header comments.
+
+    :param path: Path to the ``egm96-5.pgm`` file.
+    :returns: A ``(height, width)`` array of undulations in meters.
+    :rtype: numpy.ndarray
+    :raises ValueError: If the file is not a binary PGM or lacks the required
+        ``Offset``/``Scale`` metadata.
+    """
+    offset: float | None = None
+    scale: float | None = None
+    with path.open("rb") as f:
+
+        def token() -> bytes:
+            """Read the next whitespace-delimited header token.
+
+            Comment lines (starting with ``#``) are consumed on the way and the
+            ``Offset``/``Scale`` values they carry are captured.
+
+            :returns: The next non-comment, non-whitespace token.
+            :rtype: bytes
+            :raises ValueError: On unexpected end of file inside the header.
+            """
+            nonlocal offset, scale
+            buf = b""
+            while True:
+                c = f.read(1)
+                if c == b"#":
+                    line = f.readline()
+                    if b"Offset" in line:
+                        offset = float(line.split()[-1])
+                    elif b"Scale" in line:
+                        scale = float(line.split()[-1])
+                    continue
+                if c.isspace():
+                    if buf:
+                        return buf
+                    continue
+                if not c:
+                    raise ValueError("unexpected EOF in PGM header")
+                buf += c
+
+        magic = token()
+        if magic != b"P5":
+            raise ValueError(f"unsupported PGM magic {magic!r}")
+        width = int(token())
+        height = int(token())
+        _maxval = int(token())
+        if offset is None or scale is None:
+            raise ValueError("PGM missing Offset/Scale metadata")
+        pixels = np.frombuffer(f.read(width * height * 2), dtype=">u2")
+    return offset + scale * pixels.astype(np.float64).reshape(height, width)
+
+
+def build_grid(
+    heights: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Decimate the 5' PGM to a 0.25 degree grid on ``[-180, 180] x [-90, 90]``.
+
+    Longitude includes both -180 and +180 degrees (the identical meridian) so
+    that bilinear interpolation wraps cleanly across the seam.
+
+    :param heights: The full-resolution height array from :func:`read_pgm`,
+        with rows running +90 to -90 and columns 0 to just under 360 degrees.
+    :returns: A ``(lats, lons, undulation)`` tuple with ``lats`` and ``lons``
+        ascending and ``undulation[i, j]`` the value at ``lats[i]``/``lons[j]``.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
+    """
+    dec = heights[::DECIMATION, ::DECIMATION]  # (721, 1440): lat +90..-90, lon 0..359.75
+
+    # Flip rows to ascending latitude (-90..+90).
+    dec = dec[::-1, :]
+
+    # Reorder columns from 0..359.75 to -180..+180 and append the +180 wrap
+    # column (identical to -180) for clean interpolation near the seam.
+    half = dec.shape[1] // 2  # 720 -> column at lon 180 degrees
+    reordered = np.concatenate([dec[:, half:], dec[:, : half + 1]], axis=1)
+
+    nlat, nlon = reordered.shape
+    lats = np.linspace(-90.0, 90.0, nlat)
+    lons = np.linspace(-180.0, 180.0, nlon)
+    return lats, lons, reordered
+
+
+def main() -> None:
+    """Parse arguments, build the grid, and write the compressed ``.npz``.
+
+    :returns: ``None``.
+    """
+    parser = argparse.ArgumentParser(description="Generate the bundled EGM96 grid")
+    parser.add_argument(
+        "--pgm",
+        type=pathlib.Path,
+        default=DEFAULT_PGM,
+        help="Path to the source egm96-5.pgm; downloaded here if missing "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--output",
+        type=pathlib.Path,
+        default=DEFAULT_OUTPUT,
+        help="Output .npz path (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing output file"
+    )
+    args = parser.parse_args()
+
+    if args.output.exists() and not args.force:
+        print(f"Output '{args.output}' exists; use --force to overwrite")
+        return
+
+    if args.pgm.exists():
+        print(f"Using cached PGM '{args.pgm}'")
+    else:
+        download_pgm(ARCHIVE_URL, args.pgm)
+
+    heights = read_pgm(args.pgm)
+    lats, lons, grid = build_grid(heights)
+
+    # Quantize to int16 centimeters. EGM96 spans ~-107 m..+86 m, so centimeters
+    # fit comfortably in int16 (+/-327 m) with <= 0.5 cm error.
+    undulation_cm = np.round(grid * 100.0).astype(np.int64)
+    assert np.abs(undulation_cm).max() < np.iinfo(np.int16).max, "value out of int16 range"
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        args.output,
+        lats=lats.astype(np.float64),
+        lons=lons.astype(np.float64),
+        undulation_cm=undulation_cm.astype(np.int16),
+    )
+    size = args.output.stat().st_size
+    print(f"Saved {args.output}  ({size:,} bytes)")
+    print(f"Grid {grid.shape}  min={grid.min():.1f} m  max={grid.max():.1f} m")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Aborted!")

@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated / downloaded EGM96 data (produced at build time, never committed)
+*.npy
+*.npz
+/geoid/
+.python-version
