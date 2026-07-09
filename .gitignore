@@ -13,5 +13,4 @@ wheels/
 *.npy
 *.npz
 /geoids/
-.python-version
 *.tar.bz2
