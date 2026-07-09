@@ -33,7 +33,7 @@ return an array.
 
 The package bundles the complete EGM96 5' grid (2161 × 4321 points) and
 interpolates it bilinearly. Against GeographicLib's cubic evaluation of the same
-model, over 6000 random points, the largest difference is < 0.06 m — negligible
+model, over 6000 random points, the largest difference is < 0.06 m - negligible
 next to EGM96's own ~0.5–1 m uncertainty relative to the real geoid.
 
 Bilinear error grows quickly if the grid is coarsened, so it is worth keeping
