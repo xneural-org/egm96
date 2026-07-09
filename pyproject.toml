@@ -1,6 +1,6 @@
 [project]
 name = "egm96"
-version = "0.1.0"
+version = "0.2.0"
 description = "EGM96 geoid undulations"
 readme = "README.md"
 license = "MIT"
