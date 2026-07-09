@@ -53,7 +53,7 @@ jobs:
           import glob, zipfile
           whl = glob.glob("dist/*.whl")[0]
           names = zipfile.ZipFile(whl).namelist()
-          assert any(n.endswith("egm96/data/egm96.npz") for n in names), \
+          assert any(n.endswith("egm96/data/egm96-5.npz") for n in names), \
               "grid missing from wheel:\n" + "\n".join(names)
           print("OK: grid bundled in", whl)
           PY
