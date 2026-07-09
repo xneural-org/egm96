@@ -1,0 +1,92 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      # The EGM96 grid is NOT committed. We regenerate it here from the official
+      # 5' geoid so it gets bundled into the wheel. Cache the ~18 MB source PGM
+      # so the generator only downloads it on a cache miss. The path matches the
+      # generator's default download location.
+      - uses: actions/cache@v6
+        with:
+          path: geoids/egm96-5.pgm
+          key: egm96-pgm-v1
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+
+      - name: Type-check
+        run: uv run ty check
+
+      - name: Generate grid
+        run: uv run ./generate-egm96-grid --force
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Verify the grid is bundled in the wheel
+        run: |
+          uv run --with wheel python - <<'PY'
+          import glob, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any(n.endswith("egm96/data/egm96.npz") for n in names), \
+              "grid missing from wheel:\n" + "\n".join(names)
+          print("OK: grid bundled in", whl)
+          PY
+
+      - name: Smoke-test the built wheel in isolation
+        run: |
+          whl=$(echo dist/*.whl)
+          uv run --isolated --no-project --with "$whl" python - <<'PY'
+          import egm96
+          n = egm96.undulation(48.14, 11.58)  # ~+45.5 m near Munich
+          print("undulation(48.14, 11.58) =", n, "m")
+          assert 45.4 < n < 45.6, n
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    # Publish to PyPI on tagged releases via trusted publishing.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+      - name: Publish to PyPI
+        run: uv publish
