@@ -2,14 +2,12 @@
 """Generate the bundled EGM96 grid used by the :mod:`egm96` package.
 
 Downloads the official 5' EGM96 geoid (``egm96-5.pgm``) from GeographicLib and
-builds a compact 0.25 degree grid from it.
+repackages it as a compact ``.npz`` for the package data directory.
 
-Because 0.25 degrees is exactly three times the model's 5' spacing, the grid
-nodes are an exact subset of the PGM samples: the script simply parses the PGM
-and keeps every third pixel (no interpolation, no accuracy loss at the nodes).
-The result is quantized to int16 centimeters and written as a compressed
-``.npz`` into the package data directory. The whole thing runs in well under a
-second once the source PGM is available locally.
+The full 5' grid is kept, so the shipped data reproduces the model to about
+0.05 m. Undulations are quantized to int16 centimeters and stored as second
+differences (along longitude, then latitude): the geoid is smooth, so the
+differences are tiny and compress from ~13 MB down to ~3 MB with no loss.
 
 The source PGM is downloaded once into a local cache and reused on subsequent
 runs; it is only fetched if it is not already present. The output ``.npz`` is
@@ -26,6 +24,9 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import shutil
+import tarfile
+import tempfile
 import urllib.parse
 
 import httpx
@@ -37,46 +38,48 @@ ARCHIVE_URL = (
 )
 ARCHIVE_MEMBER = "geoids/egm96-5.pgm"
 
-#: The PGM is a 5' grid; 0.25 degrees = 3 x 5', so every third sample is kept.
-DECIMATION = 3
-
 _ROOT = pathlib.Path(__file__).parent
 
 #: Local cache for the downloaded source PGM. Also read by the accuracy test.
-DEFAULT_PGM = _ROOT / "geoid" / ARCHIVE_MEMBER
+DEFAULT_PGM = _ROOT / ARCHIVE_MEMBER
 
 #: Where the generated grid is written for bundling into the wheel.
-DEFAULT_OUTPUT = _ROOT / "src" / "egm96" / "data" / "egm96.npz"
+DEFAULT_OUTPUT = _ROOT / "src" / "egm96" / "data" / "egm96-5.npz"
 
 
 def download_pgm(url: str, pgm_path: pathlib.Path) -> None:
-    """Download and extract the geoid PGM to ``pgm_path``.
+    """Download the geoid archive and extract the PGM to ``pgm_path``.
+
+    The archive is fetched into a temporary directory and only the single PGM
+    member is written to ``pgm_path``, so nothing else is left behind.
 
     :param url: URL of the ``.tar.bz2`` geoid archive to download.
-    :param pgm_path: Destination path for the extracted PGM. Its parent
-        directory is used as the extraction root and created if needed.
+    :param pgm_path: Destination path for the extracted PGM.
     :raises httpx.HTTPStatusError: If the download responds with an error status.
+    :raises ValueError: If the expected member is missing from the archive.
     """
-    import tarfile
-
-    dest = pgm_path.parent.parent  # the archive stores geoids/egm96-5.pgm
-    dest.mkdir(parents=True, exist_ok=True)
+    pgm_path.parent.mkdir(parents=True, exist_ok=True)
     filename = pathlib.PurePosixPath(urllib.parse.urlsplit(url).path).name
-    archive_path = dest / filename
 
-    print(f"Downloading {filename} ...")
-    with (
-        httpx.Client(follow_redirects=True) as client,
-        client.stream("GET", url) as response,
-    ):
-        response.raise_for_status()
-        with archive_path.open("wb") as archive:
-            for chunk in response.iter_bytes():
-                archive.write(chunk)
+    with tempfile.TemporaryDirectory() as tmp:
+        archive_path = pathlib.Path(tmp) / filename
+        print(f"Downloading {filename} ...")
+        with (
+            httpx.Client(follow_redirects=True) as client,
+            client.stream("GET", url) as response,
+        ):
+            response.raise_for_status()
+            with archive_path.open("wb") as archive:
+                for chunk in response.iter_bytes():
+                    archive.write(chunk)
 
-    print(f"Extracting {ARCHIVE_MEMBER} ...")
-    with tarfile.open(archive_path, mode="r:bz2") as tar:
-        tar.extract(tar.getmember(ARCHIVE_MEMBER), dest, filter="data")
+        print(f"Extracting {ARCHIVE_MEMBER} ...")
+        with tarfile.open(archive_path, mode="r:bz2") as tar:
+            member = tar.extractfile(ARCHIVE_MEMBER)
+            if member is None:
+                raise ValueError(f"{ARCHIVE_MEMBER!r} not found in {filename}")
+            with member, pgm_path.open("wb") as dst:
+                shutil.copyfileobj(member, dst)
 
 
 def read_pgm(path: pathlib.Path) -> npt.NDArray[np.float64]:
@@ -141,31 +144,51 @@ def read_pgm(path: pathlib.Path) -> npt.NDArray[np.float64]:
 def build_grid(
     heights: npt.NDArray[np.float64],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Decimate the 5' PGM to a 0.25 degree grid on ``[-180, 180] x [-90, 90]``.
+    """Orient the PGM onto the ``[-180, 180] x [-90, 90]`` domain.
 
-    Longitude includes both -180 and +180 degrees (the identical meridian) so
-    that bilinear interpolation wraps cleanly across the seam.
+    The rows are flipped to ascending latitude and the columns are rolled from
+    the PGM's 0..360 range to -180..+180. The +180 column (identical to -180)
+    is appended so that bilinear interpolation wraps cleanly across the seam.
 
-    :param heights: The full-resolution height array from :func:`read_pgm`,
-        with rows running +90 to -90 and columns 0 to just under 360 degrees.
-    :returns: A ``(lats, lons, undulation)`` tuple with ``lats`` and ``lons``
-        ascending and ``undulation[i, j]`` the value at ``lats[i]``/``lons[j]``.
+    :param heights: The height array from :func:`read_pgm`, with rows running
+        +90 to -90 and columns 0 to just under 360 degrees.
+    :returns: A ``(latitudes, longitudes, undulation)`` tuple with the axes
+        ascending and ``undulation[i, j]`` the value at
+        ``latitudes[i]``/``longitudes[j]``.
     :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]
     """
-    dec = heights[::DECIMATION, ::DECIMATION]  # (721, 1440): lat +90..-90, lon 0..359.75
-
     # Flip rows to ascending latitude (-90..+90).
-    dec = dec[::-1, :]
+    flipped = heights[::-1, :]
 
-    # Reorder columns from 0..359.75 to -180..+180 and append the +180 wrap
-    # column (identical to -180) for clean interpolation near the seam.
-    half = dec.shape[1] // 2  # 720 -> column at lon 180 degrees
-    reordered = np.concatenate([dec[:, half:], dec[:, : half + 1]], axis=1)
+    # Roll columns from 0..360 to -180..+180 and append the +180 wrap column
+    # (identical to -180) for clean interpolation near the seam.
+    half = flipped.shape[1] // 2  # column at lon 180 degrees
+    grid: npt.NDArray[np.float64] = np.concatenate(
+        [flipped[:, half:], flipped[:, : half + 1]], axis=1
+    )
 
-    nlat, nlon = reordered.shape
-    lats = np.linspace(-90.0, 90.0, nlat)
-    lons = np.linspace(-180.0, 180.0, nlon)
-    return lats, lons, reordered
+    nlat, nlon = grid.shape
+    latitudes = np.linspace(-90.0, 90.0, nlat, dtype=np.float64)
+    longitudes = np.linspace(-180.0, 180.0, nlon, dtype=np.float64)
+    return latitudes, longitudes, grid
+
+
+def encode(undulation_cm: npt.NDArray[np.int16]) -> npt.NDArray[np.int16]:
+    """Encode the grid as second differences for compact, lossless storage.
+
+    Differencing once along longitude and once along latitude turns the smooth
+    geoid into an array of tiny values that ``np.savez_compressed`` shrinks by
+    roughly 4x. :func:`egm96._model._decode` inverts this with two cumulative
+    sums.
+
+    :param undulation_cm: The undulation grid in int16 centimeters.
+    :returns: The second-difference array, same shape and dtype.
+    :rtype: numpy.ndarray
+    """
+    d = undulation_cm.copy()
+    d[:, 1:] = np.diff(undulation_cm, axis=1)  # difference along longitude
+    d[1:, :] = np.diff(d, axis=0)  # then along latitude
+    return d
 
 
 def main() -> None:
@@ -178,8 +201,7 @@ def main() -> None:
         "--pgm",
         type=pathlib.Path,
         default=DEFAULT_PGM,
-        help="Path to the source egm96-5.pgm; downloaded here if missing "
-        "(default: %(default)s)",
+        help="Path to the source egm96-5.pgm; downloaded here if missing (default: %(default)s)",
     )
     parser.add_argument(
         "--output",
@@ -188,7 +210,7 @@ def main() -> None:
         help="Output .npz path (default: %(default)s)",
     )
     parser.add_argument(
-        "--force", action="store_true", help="Overwrite an existing output file"
+        "--force", "-f", action="store_true", help="Overwrite an existing output file"
     )
     args = parser.parse_args()
 
@@ -202,7 +224,7 @@ def main() -> None:
         download_pgm(ARCHIVE_URL, args.pgm)
 
     heights = read_pgm(args.pgm)
-    lats, lons, grid = build_grid(heights)
+    latitudes, longitudes, grid = build_grid(heights)
 
     # Quantize to int16 centimeters. EGM96 spans ~-107 m..+86 m, so centimeters
     # fit comfortably in int16 (+/-327 m) with <= 0.5 cm error.
@@ -212,9 +234,9 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.output,
-        lats=lats.astype(np.float64),
-        lons=lons.astype(np.float64),
-        undulation_cm=undulation_cm.astype(np.int16),
+        latitudes=latitudes,
+        longitudes=longitudes,
+        undulation_d2=encode(undulation_cm.astype(np.int16)),
     )
     size = args.output.stat().st_size
     print(f"Saved {args.output}  ({size:,} bytes)")
