@@ -38,6 +38,15 @@ def test_array_broadcasts() -> None:
     assert out.shape == (3,)
 
 
+def test_float_broadcasts() -> None:
+    lats = np.array([48.14, 0.0, -33.87])
+    lons = 11.58
+    out = egm96.undulation(lats, lons)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (3,)
+    assert np.array_equal(out, egm96.undulation(lats, np.full_like(lats, lons)))
+
+
 def test_longitude_wraps() -> None:
     a = egm96.undulation(10.0, 179.9)
     b = egm96.undulation(10.0, 179.9 - 360.0)  # same meridian, wrapped
