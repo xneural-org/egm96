@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import functools
 import importlib.resources
+from collections.abc import Sequence
+from typing import Any, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -148,6 +150,24 @@ def _load_grid() -> _Grid:
         # small; decode and recover meters.
         values = _decode(data["undulation_d2"]).astype(np.float32) / 100.0
     return _Grid(latitudes, longitudes, values)
+
+
+#: Array-like inputs that are never a plain Python scalar. If either coordinate
+#: is one of these, the result is an ``ndarray``, so the scalar overload cannot
+#: overlap the array overloads.
+_ArrayInput = npt.NDArray[np.floating[Any]] | npt.NDArray[np.integer[Any]] | Sequence[Any]
+
+
+@overload
+def undulation(latitude: float, longitude: float) -> float: ...
+
+
+@overload
+def undulation(latitude: _ArrayInput, longitude: npt.ArrayLike) -> npt.NDArray[np.float64]: ...
+
+
+@overload
+def undulation(latitude: npt.ArrayLike, longitude: _ArrayInput) -> npt.NDArray[np.float64]: ...
 
 
 def undulation(
