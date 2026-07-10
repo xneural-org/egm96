@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `egm96.undulation(lat, lon)` returning the EGM96 geoid undulation in meters
+- `egm96.undulation(latitude, longitude)` returning the EGM96 geoid undulation in meters
   (height of the geoid above the WGS 84 ellipsoid). Accepts scalars or NumPy
   arrays; longitude wraps at ±180° and latitude is clamped to ±90°.
 - The full EGM96 5' grid, bundled inside the wheel and interpolated bilinearly.

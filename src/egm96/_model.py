@@ -153,7 +153,7 @@ def _load_grid() -> _Grid:
 def undulation(
     latitude: npt.ArrayLike, longitude: npt.ArrayLike
 ) -> float | npt.NDArray[np.float64]:
-    """Return the EGM96 geoid undulation in meters at ``lat``/``lon``.
+    """Return the EGM96 geoid undulation in meters at ``latitude``/``longitude``.
 
     The undulation is the height of the geoid (mean sea level) above the WGS84
     ellipsoid. To convert a GPS ellipsoidal height ``h`` to an orthometric
@@ -164,11 +164,11 @@ def undulation(
     Longitude is wrapped modulo 360 degrees and latitude is clamped to
     ``[-90, 90]``.
 
-    :param lat: Latitude in degrees. A scalar or an array-like broadcastable
-        against ``lon``.
-    :param lon: Longitude in degrees. A scalar or an array-like broadcastable
-        against ``lat``.
-    :returns: The undulation in meters -- a ``float`` for scalar inputs, or an
+    :param latitude: Latitude in degrees. A scalar or an array-like broadcastable
+        against ``longitude``.
+    :param longitude: Longitude in degrees. A scalar or an array-like broadcastable
+        against ``latitude``.
+    :returns: The undulation in meters - a ``float`` for scalar inputs, or an
         ``ndarray`` when either input is array-like.
     :rtype: float | numpy.ndarray
     """
